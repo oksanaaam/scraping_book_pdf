@@ -1,11 +1,14 @@
+import re
 import openpyxl
 import fitz
+
+from openpyxl.styles import Font
 
 
 pdf_file = "C:/Users/User/projects/scraping_book_pdf/Abstract Book.pdf"
 xl_file = "C:/Users/User/projects/scraping_book_pdf/task.xlsx"
 
-start_page = 44
+start_page = 43
 last_page = 64
 
 
@@ -33,6 +36,7 @@ def extract_articles_from_pdf(file_path: str):
     articles = []
     current_article = Article()
     previous_article = None
+    previous_author = None
 
     file = fitz.open(file_path)
 
@@ -43,38 +47,42 @@ def extract_articles_from_pdf(file_path: str):
         for block in text_blocks:
             for line in block["lines"]:
                 for span in line["spans"]:
-                    block_name = (
-                        span["font"] == "TimesNewRomanPS-BoldItal"
-                        and span["size"] == 9.5
-                    )
-                    block_title = (
-                        span["font"] == "TimesNewRomanPS-BoldMT"
-                        and span["size"] == 9
-                    )
+                    text = span["text"]
+
                     authors = (
-                        span["font"] == "TimesNewRomanPS-ItalicMT"
-                        and span["size"] == 9
+                        span["font"] == "TimesNewRomanPS-ItalicMT" and span["size"] == 9
                     )
                     affiliations_data = (
-                        span["font"] == "TimesNewRomanPS-ItalicMT"
-                        and span["size"] == 8
+                        span["font"] == "TimesNewRomanPS-ItalicMT" and span["size"] == 8
                     )
                     abstract_data = span["size"] == 9.134002685546875
 
-                    text_pattern = span["text"]
+                    session_name_match = re.match(r"P\d+", text)
+                    if session_name_match:
+                        current_article.session_name = session_name_match.group(
+                            0
+                        ).strip()
 
-                    if block_name:
-                        current_article.session_name += text_pattern
-                    elif block_title:
-                        current_article.session_title += text_pattern
+                    if current_article.session_name and text.isupper():
+                        session_title = re.sub(
+                            r"^" + re.escape(current_article.session_name),
+                            "",
+                            text.strip(),
+                            flags=re.IGNORECASE,
+                        )
+                        current_article.session_title += session_title.strip()
+
                     elif authors:
-                        author = text_pattern.strip().replace(", ", "")
-                        print(author)
+                        author = text.replace("- ", "").strip()
                         if author:
-                            current_article.authors.append(author)
+                            if previous_author and author[0].islower():
+                                current_article.authors[-1] += " " + author
+                            else:
+                                current_article.authors.append(author)
+                            previous_author = author
                     elif affiliations_data:
-                        if "," in text_pattern:
-                            words = text_pattern.split(",")
+                        if "," in text:
+                            words = text.split(",")
                             affiliations = []
                             location = ""
                             for word in words:
@@ -89,11 +97,11 @@ def extract_articles_from_pdf(file_path: str):
                                 current_article.location.append(location)
                             current_article.affiliations.extend(affiliations)
                         else:
-                            if text_pattern.strip():
-                                current_article.affiliations.append(text_pattern)
+                            if text.strip():
+                                current_article.affiliations.append(text)
 
                     elif abstract_data:
-                        current_article.presentation_abstract += text_pattern
+                        current_article.presentation_abstract += text
 
             if block["type"] == 0:
                 if (
@@ -105,16 +113,23 @@ def extract_articles_from_pdf(file_path: str):
                 ):
                     if not current_article.session_name:
                         if previous_article is not None:
-                            previous_article.session_title += current_article.session_title
-                            previous_article.affiliations.extend(current_article.affiliations)
+                            previous_article.session_title += (
+                                current_article.session_title
+                            )
+                            previous_article.affiliations.extend(
+                                current_article.affiliations
+                            )
                             previous_article.location.extend(current_article.location)
-                            previous_article.presentation_abstract += current_article.presentation_abstract
+                            previous_article.presentation_abstract += (
+                                current_article.presentation_abstract
+                            )
                             current_article = previous_article
                     articles.append(current_article)
                     previous_article = current_article
                     current_article = Article()
 
     file.close()
+
     return articles
 
 
@@ -124,18 +139,115 @@ def update_excel_file(article):
 
     row = sheet.max_row + 1
 
-    sheet.cell(row=row, column=1).value = ", ".join(article.authors)
-    sheet.cell(row=row, column=2).value = ", ".join(article.affiliations)
-    sheet.cell(row=row, column=3).value = ", ".join(article.location)
-    sheet.cell(row=row, column=4).value = article.session_name
-    sheet.cell(row=row, column=5).value = article.session_title
-    sheet.cell(row=row, column=6).value = article.presentation_abstract
+    existing_authors = (
+        set(sheet.cell(row=row, column=1).value.split(", "))
+        if sheet.cell(row=row, column=1).value
+        else set()
+    )
+
+    for author in article.authors:
+        if not author:
+            continue
+
+        if len(author) == 1:
+            if existing_authors:
+                previous_author = existing_authors.pop()
+                author = previous_author + " " + author
+            else:
+                continue
+
+        if author.count(",") > 2:
+            continue
+
+        if author.startswith(", "):
+            author = author[2:]
+
+        sheet.cell(row=row, column=1).value = author
+        sheet.cell(row=row, column=2).value = ", ".join(article.affiliations)
+        sheet.cell(row=row, column=3).value = ", ".join(article.location)
+        sheet.cell(row=row, column=4).value = article.session_name
+        sheet.cell(row=row, column=5).value = article.session_title
+        sheet.cell(row=row, column=6).value = article.presentation_abstract
+
+        font = Font(name="Arial", size=10)
+        for col in range(1, 7):
+            sheet.cell(row=row, column=col).font = font
+
+        existing_authors.add(author)
 
     workbook.save(xl_file)
 
 
+def read_existing_data():
+    workbook = openpyxl.load_workbook(xl_file)
+    sheet = workbook.active
+
+    existing_data = set()
+
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        authors = row[0]
+        affiliations = row[1]
+        location = row[2]
+        session_name = row[3]
+        session_title = row[4]
+        presentation_abstract = row[5]
+
+        existing_data.add(
+            (
+                authors,
+                affiliations,
+                location,
+                session_name,
+                session_title,
+                presentation_abstract,
+            )
+        )
+
+    return existing_data
+
+
+def process_articles(articles):
+    existing_data = read_existing_data()
+
+    for article in articles:
+        for author in article.authors:
+            article_copy = Article()
+            article_copy.session_name = article.session_name
+            article_copy.session_title = article.session_title
+            article_copy.authors = [author]
+            article_copy.affiliations = article.affiliations.copy()
+            article_copy.location = article.location.copy()
+            article_copy.presentation_abstract = article.presentation_abstract
+
+            if article_copy.authors:
+                if (
+                    ", ".join(article_copy.authors),
+                    ", ".join(article_copy.affiliations),
+                    ", ".join(article_copy.location),
+                    article_copy.session_name,
+                    article_copy.session_title,
+                    article_copy.presentation_abstract,
+                ) not in existing_data:
+                    update_excel_file(article_copy)
+                    existing_data.add(
+                        (
+                            ", ".join(article_copy.authors),
+                            ", ".join(article_copy.affiliations),
+                            ", ".join(article_copy.location),
+                            article_copy.session_name,
+                            article_copy.session_title,
+                            article_copy.presentation_abstract,
+                        )
+                    )
+
+
 if __name__ == "__main__":
     pdf_articles = extract_articles_from_pdf(pdf_file)
-    for article in pdf_articles:
-        print(article)
-        update_excel_file(article)
+
+    pdf_articles = [
+        article
+        for article in pdf_articles
+        if any(author.strip() for author in article.authors)
+    ]
+
+    process_articles(pdf_articles)
